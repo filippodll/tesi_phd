@@ -9,6 +9,7 @@ import csv
 import json
 import math
 import pathlib
+import shutil
 import sys
 from typing import Iterable, List, Tuple
 
@@ -153,7 +154,19 @@ def main() -> int:
         "--output-node-props",
         type=pathlib.Path,
         default=None,
-        help="Where to write the updated node_props.csv (default: in-place).",
+        help="Where to write the updated node_props.csv (default: node_props_tl.csv beside the input).",
+    )
+    parser.add_argument(
+        "--edges",
+        type=pathlib.Path,
+        default=pathlib.Path("input/edges.csv"),
+        help="Path to the edges.csv file to copy.",
+    )
+    parser.add_argument(
+        "--output-edges",
+        type=pathlib.Path,
+        default=None,
+        help="Where to write the copied edges file (default: edges_tl.csv beside the input).",
     )
     parser.add_argument(
         "--save-osm-nodes",
@@ -182,7 +195,11 @@ def main() -> int:
     args = parser.parse_args()
 
     node_props_path: pathlib.Path = args.node_props
-    output_node_props: pathlib.Path = args.output_node_props or node_props_path
+    output_node_props: pathlib.Path = args.output_node_props or node_props_path.with_name(
+        "node_props_tl.csv"
+    )
+    edges_path: pathlib.Path = args.edges
+    output_edges: pathlib.Path = args.output_edges or edges_path.with_name("edges_tl.csv")
     node_props, fieldnames = load_node_props(node_props_path)
 
     bbox = args.bbox or bbox_from_nodes(node_props)
@@ -194,10 +211,14 @@ def main() -> int:
     )
     write_node_props(node_props, fieldnames, output_node_props)
 
+    output_edges.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy(edges_path, output_edges)
+
     print(
         f"Updated {updated_count} nodes to traffic_light. "
         f"OSM nodes saved to {args.save_osm_nodes}. "
-        f"node_props written to {output_node_props}."
+        f"node_props written to {output_node_props}. "
+        f"edges copied to {output_edges}."
     )
     return 0
 
