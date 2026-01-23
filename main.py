@@ -5,8 +5,9 @@ import pickle
 import shutil
 import threading
 import json
+import pandas as pd
 from collections import deque
-
+import random
 import dsf
 from dsf import mobility
 
@@ -48,6 +49,12 @@ rn.importEdges("./input/edges_tl.csv")
 rn.importNodeProperties("./input/node_props_tl.csv")
 rn.makeRoundabout(72)
 rn.initTrafficLights()
+
+def _normalize_id(val):
+    try:
+        return int(val)
+    except (TypeError, ValueError):
+        return val
 
 
 print(f"Bologna's road network has {rn.nNodes()} nodes and {rn.nEdges()} edges.")
@@ -218,8 +225,25 @@ def report_density_stability(path):
     )
 
 if USE_OD_PROFILES and origin_nodes and destination_nodes:
-    combined_origins = merge_weighted_dicts(origin_nodes)
-    combined_destinations = merge_weighted_dicts(destination_nodes)
+    _nodes_df = pd.read_csv("./input/node_props_tl.csv", sep=';')
+    _tl_ids = {
+        _normalize_id(i)
+        for i in _nodes_df.loc[
+            _nodes_df["type"].str.contains("traffic_signals", case=False, na=False), "id"
+        ]
+    }
+    _allowed_nodes = [
+        _normalize_id(i) for i in _nodes_df["id"] if _normalize_id(i) not in _tl_ids
+    ]
+    def _skip_tl(d):
+        if not _allowed_nodes:
+            return d
+        return {
+            (random.choice(_allowed_nodes) if _normalize_id(k) in _tl_ids else k): v
+            for k, v in d.items()
+        }
+    combined_origins = _skip_tl(merge_weighted_dicts(origin_nodes))
+    combined_destinations = _skip_tl(merge_weighted_dicts(destination_nodes))
     print(
         f"Using combined origins ({len(combined_origins)}) and destinations ({len(combined_destinations)}) for all time."
     )
