@@ -44,9 +44,11 @@ if USE_OD_PROFILES:
                 dest_dict[key] = 1
 
 rn = mobility.RoadNetwork()
-rn.importEdges("./input/edges.csv")
-rn.importNodeProperties("./input/node_props.csv")
+rn.importEdges("./input/edges_tl.csv")
+rn.importNodeProperties("./input/node_props_tl.csv")
 rn.makeRoundabout(72)
+rn.initTrafficLights()
+
 
 print(f"Bologna's road network has {rn.nNodes()} nodes and {rn.nEdges()} edges.")
 print(
