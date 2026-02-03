@@ -5,9 +5,9 @@ import pickle
 import shutil
 import threading
 import json
-import pandas as pd
 from collections import deque
-import random
+import random 
+import pandas as pd
 import dsf
 from dsf import mobility
 
@@ -19,13 +19,15 @@ USE_OD_PROFILES = True  # set False to ignore OD pickles and spawn fully random
 NORM_WEIGHTS = False
 SMOOTHING_HOURS = 3  # Number of hours to average over (odd number recommended)
 BASE_AGENT_COUNT = 50  # Agents to inject every DT_AGENT seconds
-CHARGE_INCREMENT = 10  # Permanent increment added to BASE_AGENT_COUNT when triggered
+CHARGE_INCREMENT = 20  # Permanent increment added to BASE_AGENT_COUNT when triggered
 
 # Stability evaluation settings (mean density of the network)
 STABILITY_WINDOW = 24  # Number of recent macroscopic records to evaluate (e.g., ~2 hours if saved every 5 minutes)
 STABILITY_MIN_POINTS = 8  # Minimum points required before computing statistics
 STABILITY_ALPHA = 0.05  # Significance for the trend test (two-sided)
 STABILITY_CV_THRESHOLD = 0.10  # Coefficient of variation threshold for declaring stability (relative dispersion)
+STABILITY_HOLD_SECONDS = 3600  # Stable condition must persist this long before adding agents
+STABILITY_COOLDOWN_SECONDS = 7200  # Minimum time between agent injections
 
 print(f"Using dsf version {dsf.__version__}")
 
@@ -45,17 +47,37 @@ if USE_OD_PROFILES:
                 dest_dict[key] = 1
 
 rn = mobility.RoadNetwork()
-rn.importEdges("./input/edges_tl.csv")
+# Clear existing coilcodes so we add coils explicitly
+edges_file = "./input/edges_tl.csv"
+edge_df_for_import = pd.read_csv(edges_file, sep=";")
+if "coilcode" in edge_df_for_import.columns:
+    edge_df_for_import["coilcode"] = pd.NA
+    edge_df_for_import.to_csv(edges_file, sep=";", index=False)
+
+rn.importEdges(edges_file)
 rn.importNodeProperties("./input/node_props_tl.csv")
 rn.makeRoundabout(72)
-rn.initTrafficLights()
+rn.autoInitTrafficLights()
+
+
+# Add coils only on selected OSM road classes
+_edge_df = pd.read_csv(edges_file, sep=";", usecols=["id", "type"])
+_coil_types = {"motorway", "trunk", "primary", "secondary", "tertiary"}
+for sid, stype in zip(_edge_df["id"], _edge_df["type"]):
+    if isinstance(stype, str) and stype.lower() in _coil_types:
+        try:
+            rn.addCoil(int(sid), name=str(int(sid)))
+        except RuntimeError:
+            pass
+if rn.nCoils() == 0:
+    print("No matching road classes for coils; none added.")
+
 
 def _normalize_id(val):
     try:
         return int(val)
     except (TypeError, ValueError):
         return val
-
 
 print(f"Bologna's road network has {rn.nNodes()} nodes and {rn.nEdges()} edges.")
 print(
@@ -78,7 +100,7 @@ shutil.copy("./input/edges.csv", "./output/edges.csv")
 print(f"Maximum capacity of the network is {rn.capacity()} agents.")
 
 simulator = mobility.Dynamics(rn, False, 69, 0.8)
-simulator.killStagnantAgents(5.0)
+simulator.killStagnantAgents(7.0)
 #simulator.setWeightFunction(mobility.PathWeight.TRAVELTIME, weightThreshold=1.5)
 
 #simulator.setErrorProbability(0.15)
@@ -106,21 +128,28 @@ def _parse_float(value):
     return None if math.isnan(parsed) or math.isinf(parsed) else parsed
 
 
-def _load_mean_density_series(path, window_size):
+def _load_mean_density_series(path, window_size, min_time_step=None):
     """
     Read the last `window_size` mean density observations from the macroscopic CSV.
     """
     series = deque(maxlen=window_size)
+    times = deque(maxlen=window_size)
     try:
         with open(path, newline="") as f:
             reader = csv.DictReader(f, delimiter=";")
             for row in reader:
+                ts = _parse_float(row.get("time_step"))
+                if ts is None:
+                    continue
+                if min_time_step is not None and ts <= min_time_step:
+                    continue
                 value = _parse_float(row.get("mean_density_vpk"))
                 if value is not None:
                     series.append(value)
+                    times.append(ts)
     except FileNotFoundError:
-        return []
-    return list(series)
+        return [], []
+    return list(series), list(times)
 
 
 def _mann_kendall_test(values):
@@ -159,13 +188,19 @@ def _mann_kendall_test(values):
     return s, z, p_value
 
 
-def _sen_slope(values):
+def _sen_slope(values, times=None):
     """Median pairwise slope (Sen's slope)."""
     slopes = []
     n = len(values)
     for i in range(n - 1):
         for j in range(i + 1, n):
-            slopes.append((values[j] - values[i]) / (j - i))
+            if times:
+                dt = times[j] - times[i]
+                if dt <= 0:
+                    continue
+            else:
+                dt = j - i
+            slopes.append((values[j] - values[i]) / dt)
     if not slopes:
         return 0.0
     slopes.sort()
@@ -175,15 +210,21 @@ def _sen_slope(values):
     return slopes[mid]
 
 
-def evaluate_density_stability(path, alpha=STABILITY_ALPHA, cv_threshold=STABILITY_CV_THRESHOLD):
+def evaluate_density_stability(
+    path,
+    alpha=STABILITY_ALPHA,
+    cv_threshold=STABILITY_CV_THRESHOLD,
+    min_time_step=None,
+):
     """
     Evaluate network stability using the mean density time series:
       - Mann-Kendall test for monotonic trends (p-value)
       - Sen's slope (robust trend magnitude)
       - Coefficient of variation as dispersion measure
+      - R metric: (|slope| * DeltaT) / sigma
     Returns a dict with metrics or None if not enough data.
     """
-    series = _load_mean_density_series(path, STABILITY_WINDOW)
+    series, times = _load_mean_density_series(path, STABILITY_WINDOW, min_time_step)
     n = len(series)
     if n < STABILITY_MIN_POINTS:
         return None
@@ -194,11 +235,22 @@ def evaluate_density_stability(path, alpha=STABILITY_ALPHA, cv_threshold=STABILI
     cv = std_dev / mean_val if mean_val else float("inf")
 
     s, z, p_value = _mann_kendall_test(series)
-    sen_slope = _sen_slope(series)
-    stable = p_value > alpha and cv <= cv_threshold
+    sen_slope = _sen_slope(series, times)
+
+    total_span = times[-1] - times[0] if len(times) >= 2 else None
+    if total_span is None:
+        r_metric = float("inf")
+    else:
+        if std_dev == 0:
+            r_metric = 0.0 if sen_slope == 0 else float("inf")
+        else:
+            r_metric = (abs(sen_slope) * total_span) / std_dev
+
+    stable = r_metric < 1.0
 
     return {
         "samples": n,
+        "total_span_seconds": total_span,
         "mean_density_vpk": mean_val,
         "std_density_vpk": std_dev,
         "coefficient_of_variation": cv,
@@ -206,14 +258,15 @@ def evaluate_density_stability(path, alpha=STABILITY_ALPHA, cv_threshold=STABILI
         "z_score": z,
         "p_value": p_value,
         "sen_slope_per_step": sen_slope,
+        "r_metric": r_metric,
         "is_stable": stable,
     }
 
 
-def report_density_stability(path):
-    stats = evaluate_density_stability(path)
+def report_density_stability(path, min_time_step=None):
+    stats = evaluate_density_stability(path, min_time_step=min_time_step)
     if not stats:
-        return
+        return None
     with open("./output/stability.json", "w") as f:
         json.dump(stats, f, indent=2)
     print(
@@ -221,8 +274,11 @@ def report_density_stability(path):
         f"n={stats['samples']} mean={stats['mean_density_vpk']:.3f} "
         f"CV={stats['coefficient_of_variation']:.3f} "
         f"p={stats['p_value']:.3f} slope={stats['sen_slope_per_step']:.3e} "
-        f"stable={stats['is_stable']}"
+        f"R={stats['r_metric']:.3f} stable={stats['is_stable']}"
     )
+    return stats
+
+
 
 if USE_OD_PROFILES and origin_nodes and destination_nodes:
     _nodes_df = pd.read_csv("./input/node_props_tl.csv", sep=';')
@@ -256,6 +312,9 @@ else:
 # Mutable base count protected by a lock; grows permanently when user types "c"
 charge_lock = threading.Lock()
 base_agent_count = BASE_AGENT_COUNT
+last_reset_time_step = 0
+last_charge_time_step = -STABILITY_COOLDOWN_SECONDS
+stable_since_time_step = None
 
 # Background listener to trigger a permanent base increase when user types "c" + Enter
 def listen_for_charge_more():
@@ -282,14 +341,36 @@ try:
             # print(f"Updated paths")
 
         if i >= 0:
-            if i % 3600 == 0:
-                simulator.saveCoilCounts("./output/counts.csv", True)
             if i % 300 == 0:
+                simulator.saveCoilCounts("./output/counts.csv", True)
                 simulator.saveStreetDensities("./output/densities.csv", True)
                 simulator.saveTravelData("./output/speeds.csv")
                 # if i % 1500 == 0:
                 simulator.saveMacroscopicObservables("./output/data.csv")
-                report_density_stability("./output/data.csv")
+                stats = report_density_stability(
+                    "./output/data.csv", min_time_step=last_reset_time_step
+                )
+                if stats:
+                    if stats["is_stable"]:
+                        if stable_since_time_step is None:
+                            stable_since_time_step = i
+                        elif (
+                            i - stable_since_time_step >= STABILITY_HOLD_SECONDS
+                            and i - last_charge_time_step >= STABILITY_COOLDOWN_SECONDS
+                        ):
+                            with charge_lock:
+                                base_agent_count += CHARGE_INCREMENT
+                                updated = base_agent_count
+                            last_charge_time_step = i
+                            last_reset_time_step = i
+                            stable_since_time_step = None
+                            print(
+                                f"[auto-charge] Stability maintained for {STABILITY_HOLD_SECONDS}s "
+                                f"and cooldown met. New BASE_AGENT_COUNT: {updated}. Window reset."
+                            )
+                            simulator.saveMacroscopicObservables("./output/stability_timestep.csv")
+                    else:
+                        stable_since_time_step = None
         if i % DT_AGENT == 0:
             with charge_lock:
                 n_agents = base_agent_count
