@@ -1,0 +1,13 @@
+{
+  "samples": 24,
+  "total_span_seconds": 6900.0,
+  "mean_density_vpk": 38.65833333333333,
+  "std_density_vpk": 0.22634461349449253,
+  "coefficient_of_variation": 0.005855001858016621,
+  "mann_kendall_s": 90,
+  "z_score": 2.23198588846106,
+  "p_value": 0.02561589561140921,
+  "sen_slope_per_step": 5.5555555555555355e-05,
+  "r_metric": 1.6935827516065864,
+  "is_stable": false
+}

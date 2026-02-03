@@ -343,8 +343,9 @@ try:
         if i >= 0:
             if i % 300 == 0:
                 simulator.saveCoilCounts("./output/counts.csv", True)
-                simulator.saveStreetDensities("./output/densities.csv", True)
+                simulator.saveStreetDensities("./output/densities.csv")
                 simulator.saveTravelData("./output/speeds.csv")
+                
                 # if i % 1500 == 0:
                 simulator.saveMacroscopicObservables("./output/data.csv")
                 stats = report_density_stability(
@@ -369,6 +370,7 @@ try:
                                 f"and cooldown met. New BASE_AGENT_COUNT: {updated}. Window reset."
                             )
                             simulator.saveMacroscopicObservables("./output/stability_timestep.csv")
+                            simulator.saveStreetSpeeds("./output/street_speeds.csv")
                     else:
                         stable_since_time_step = None
         if i % DT_AGENT == 0:
