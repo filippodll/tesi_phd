@@ -18,8 +18,8 @@ USE_OD_PROFILES = True  # set False to ignore OD pickles and spawn fully random
 
 NORM_WEIGHTS = False
 SMOOTHING_HOURS = 3  # Number of hours to average over (odd number recommended)
-BASE_AGENT_COUNT = 50  # Agents to inject every DT_AGENT seconds
-CHARGE_INCREMENT = 20  # Permanent increment added to BASE_AGENT_COUNT when triggered
+BASE_AGENT_COUNT = 20  # Agents to inject every DT_AGENT seconds
+CHARGE_INCREMENT = 15  # Permanent increment added to BASE_AGENT_COUNT when triggered
 
 # Stability evaluation settings (mean density of the network)
 STABILITY_WINDOW = 24  # Number of recent macroscopic records to evaluate (e.g., ~2 hours if saved every 5 minutes)
@@ -335,6 +335,7 @@ threading.Thread(target=listen_for_charge_more, daemon=True).start()
 try:
     i = 0
     simulator.updatePaths()
+
     while True:
         #if i % 300 == 0:
             #simulator.updatePaths()
