@@ -6,7 +6,8 @@ import shutil
 import threading
 import json
 from collections import deque
-
+import random 
+import pandas as pd
 import dsf
 from dsf import mobility
 
@@ -17,8 +18,8 @@ USE_OD_PROFILES = True  # set False to ignore OD pickles and spawn fully random
 
 NORM_WEIGHTS = False
 SMOOTHING_HOURS = 3  # Number of hours to average over (odd number recommended)
-BASE_AGENT_COUNT = 50  # Agents to inject every DT_AGENT seconds
-CHARGE_INCREMENT = 30  # Permanent increment added to BASE_AGENT_COUNT when triggered
+BASE_AGENT_COUNT = 20  # Agents to inject every DT_AGENT seconds
+CHARGE_INCREMENT = 15  # Permanent increment added to BASE_AGENT_COUNT when triggered
 
 # Stability evaluation settings (mean density of the network)
 STABILITY_WINDOW = 24  # Number of recent macroscopic records to evaluate (e.g., ~2 hours if saved every 5 minutes)
@@ -46,10 +47,37 @@ if USE_OD_PROFILES:
                 dest_dict[key] = 1
 
 rn = mobility.RoadNetwork()
-rn.importEdges("./input/edges.csv")
-rn.importNodeProperties("./input/node_props.csv")
-rn.makeRoundabout(72)
+# Clear existing coilcodes so we add coils explicitly
+edges_file = "./input/edges_tl.csv"
+edge_df_for_import = pd.read_csv(edges_file, sep=";")
+if "coilcode" in edge_df_for_import.columns:
+    edge_df_for_import["coilcode"] = pd.NA
+    edge_df_for_import.to_csv(edges_file, sep=";", index=False)
 
+rn.importEdges(edges_file)
+rn.importNodeProperties("./input/node_props_tl.csv")
+rn.makeRoundabout(72)
+rn.autoInitTrafficLights()
+
+
+# Add coils only on selected OSM road classes
+_edge_df = pd.read_csv(edges_file, sep=";", usecols=["id", "type"])
+_coil_types = {"motorway", "trunk", "primary", "secondary", "tertiary"}
+for sid, stype in zip(_edge_df["id"], _edge_df["type"]):
+    if isinstance(stype, str) and stype.lower() in _coil_types:
+        try:
+            rn.addCoil(int(sid), name=str(int(sid)))
+        except RuntimeError:
+            pass
+if rn.nCoils() == 0:
+    print("No matching road classes for coils; none added.")
+
+
+def _normalize_id(val):
+    try:
+        return int(val)
+    except (TypeError, ValueError):
+        return val
 
 print(f"Bologna's road network has {rn.nNodes()} nodes and {rn.nEdges()} edges.")
 print(
@@ -72,7 +100,7 @@ shutil.copy("./input/edges.csv", "./output/edges.csv")
 print(f"Maximum capacity of the network is {rn.capacity()} agents.")
 
 simulator = mobility.Dynamics(rn, False, 69, 0.8)
-simulator.killStagnantAgents(10.0)
+simulator.killStagnantAgents(7.0)
 #simulator.setWeightFunction(mobility.PathWeight.TRAVELTIME, weightThreshold=1.5)
 
 #simulator.setErrorProbability(0.15)
@@ -250,9 +278,28 @@ def report_density_stability(path, min_time_step=None):
     )
     return stats
 
+
+
 if USE_OD_PROFILES and origin_nodes and destination_nodes:
-    combined_origins = merge_weighted_dicts(origin_nodes)
-    combined_destinations = merge_weighted_dicts(destination_nodes)
+    _nodes_df = pd.read_csv("./input/node_props_tl.csv", sep=';')
+    _tl_ids = {
+        _normalize_id(i)
+        for i in _nodes_df.loc[
+            _nodes_df["type"].str.contains("traffic_signals", case=False, na=False), "id"
+        ]
+    }
+    _allowed_nodes = [
+        _normalize_id(i) for i in _nodes_df["id"] if _normalize_id(i) not in _tl_ids
+    ]
+    def _skip_tl(d):
+        if not _allowed_nodes:
+            return d
+        return {
+            (random.choice(_allowed_nodes) if _normalize_id(k) in _tl_ids else k): v
+            for k, v in d.items()
+        }
+    combined_origins = _skip_tl(merge_weighted_dicts(origin_nodes))
+    combined_destinations = _skip_tl(merge_weighted_dicts(destination_nodes))
     print(
         f"Using combined origins ({len(combined_origins)}) and destinations ({len(combined_destinations)}) for all time."
     )
@@ -296,8 +343,9 @@ try:
         if i >= 0:
             if i % 300 == 0:
                 simulator.saveCoilCounts("./output/counts.csv", True)
-                simulator.saveStreetDensities("./output/densities.csv", True)
+                simulator.saveStreetDensities("./output/densities.csv")
                 simulator.saveTravelData("./output/speeds.csv")
+                
                 # if i % 1500 == 0:
                 simulator.saveMacroscopicObservables("./output/data.csv")
                 stats = report_density_stability(
@@ -322,6 +370,7 @@ try:
                                 f"and cooldown met. New BASE_AGENT_COUNT: {updated}. Window reset."
                             )
                             simulator.saveMacroscopicObservables("./output/stability_timestep.csv")
+                            simulator.saveStreetSpeeds("./output/street_speeds.csv")
                     else:
                         stable_since_time_step = None
         if i % DT_AGENT == 0:
