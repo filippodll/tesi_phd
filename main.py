@@ -3,6 +3,7 @@ import math
 import pathlib
 import pickle
 import shutil
+import sqlite3
 import threading
 import json
 from collections import deque
@@ -90,6 +91,7 @@ output_dir.mkdir(parents=True, exist_ok=True)
 for file in output_dir.glob("*"):
     if file.is_file():
         file.unlink()
+db_path = output_dir / "simulation_data.db"
 
 rn.adjustNodeCapacities()
 rn.autoMapStreetLanes()
@@ -110,6 +112,9 @@ simulator.killStagnantAgents(7.0)
 # Get the epoch time for 2022-01-31 00:00:00 UTC
 epoch_time = 1643587200
 simulator.setInitTime(epoch_time)
+simulator.connectDataBase(str(db_path))
+# Persist stats every 300 steps into the DB (avg stats + per-street + travel samples)
+simulator.saveData(300, True, True, True)
 
 # Combine all hourly origins/destinations into a single always-on set
 def merge_weighted_dicts(dicts):
@@ -130,25 +135,50 @@ def _parse_float(value):
 
 def _load_mean_density_series(path, window_size, min_time_step=None):
     """
-    Read the last `window_size` mean density observations from the macroscopic CSV.
+    Read the last `window_size` mean density observations from the DB (preferred) or CSV.
     """
     series = deque(maxlen=window_size)
     times = deque(maxlen=window_size)
-    try:
-        with open(path, newline="") as f:
-            reader = csv.DictReader(f, delimiter=";")
-            for row in reader:
-                ts = _parse_float(row.get("time_step"))
-                if ts is None:
+    if str(path).endswith(".db"):
+        query = "SELECT time_step, mean_density_vpk FROM avg_stats"
+        params = ()
+        if min_time_step is not None:
+            query += " WHERE time_step > ?"
+            params = (min_time_step,)
+        query += " ORDER BY time_step ASC"
+        try:
+            conn = sqlite3.connect(path)
+            cur = conn.cursor()
+            for ts, val in cur.execute(query, params):
+                ts = _parse_float(ts)
+                val = _parse_float(val)
+                if ts is None or val is None:
                     continue
-                if min_time_step is not None and ts <= min_time_step:
-                    continue
-                value = _parse_float(row.get("mean_density_vpk"))
-                if value is not None:
-                    series.append(value)
-                    times.append(ts)
-    except FileNotFoundError:
-        return [], []
+                series.append(val)
+                times.append(ts)
+        except sqlite3.Error:
+            return [], []
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    else:
+        try:
+            with open(path, newline="") as f:
+                reader = csv.DictReader(f, delimiter=";")
+                for row in reader:
+                    ts = _parse_float(row.get("time_step"))
+                    if ts is None:
+                        continue
+                    if min_time_step is not None and ts <= min_time_step:
+                        continue
+                    value = _parse_float(row.get("mean_density_vpk"))
+                    if value is not None:
+                        series.append(value)
+                        times.append(ts)
+        except FileNotFoundError:
+            return [], []
     return list(series), list(times)
 
 
@@ -336,48 +366,35 @@ try:
     i = 0
     simulator.updatePaths()
     while True:
-        #if i % 300 == 0:
-            #simulator.updatePaths()
-            # print(f"Updated paths")
-
-        if i >= 0:
-            if i % 300 == 0:
-                simulator.saveCoilCounts("./output/counts.csv", True)
-                simulator.saveStreetDensities("./output/densities.csv")
-                simulator.saveTravelData("./output/speeds.csv")
-                
-                # if i % 1500 == 0:
-                simulator.saveMacroscopicObservables("./output/data.csv")
-                stats = report_density_stability(
-                    "./output/data.csv", min_time_step=last_reset_time_step
-                )
-                if stats:
-                    if stats["is_stable"]:
-                        if stable_since_time_step is None:
-                            stable_since_time_step = i
-                        elif (
-                            i - stable_since_time_step >= STABILITY_HOLD_SECONDS
-                            and i - last_charge_time_step >= STABILITY_COOLDOWN_SECONDS
-                        ):
-                            with charge_lock:
-                                base_agent_count += CHARGE_INCREMENT
-                                updated = base_agent_count
-                            last_charge_time_step = i
-                            last_reset_time_step = i
-                            stable_since_time_step = None
-                            print(
-                                f"[auto-charge] Stability maintained for {STABILITY_HOLD_SECONDS}s "
-                                f"and cooldown met. New BASE_AGENT_COUNT: {updated}. Window reset."
-                            )
-                            simulator.saveMacroscopicObservables("./output/stability_timestep.csv")
-                            simulator.saveStreetSpeeds("./output/street_speeds.csv")
-                    else:
-                        stable_since_time_step = None
         if i % DT_AGENT == 0:
             with charge_lock:
                 n_agents = base_agent_count
             simulator.addAgentsRandomly(n_agents if n_agents > 0 else 0)
         simulator.evolve(False)
+        if i >= 0 and i % 300 == 0:
+            stats = report_density_stability(
+                db_path, min_time_step=last_reset_time_step
+            )
+            if stats:
+                if stats["is_stable"]:
+                    if stable_since_time_step is None:
+                        stable_since_time_step = i
+                    elif (
+                        i - stable_since_time_step >= STABILITY_HOLD_SECONDS
+                        and i - last_charge_time_step >= STABILITY_COOLDOWN_SECONDS
+                    ):
+                        with charge_lock:
+                            base_agent_count += CHARGE_INCREMENT
+                            updated = base_agent_count
+                        last_charge_time_step = i
+                        last_reset_time_step = i
+                        stable_since_time_step = None
+                        print(
+                            f"[auto-charge] Stability maintained for {STABILITY_HOLD_SECONDS}s "
+                            f"and cooldown met. New BASE_AGENT_COUNT: {updated}. Window reset."
+                        )
+                else:
+                    stable_since_time_step = None
         i += 1
 except KeyboardInterrupt:
     print("Simulation stopped by user.")
