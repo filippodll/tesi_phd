@@ -99,7 +99,7 @@ shutil.copy("./input/edges.csv", "./output/edges.csv")
 
 print(f"Maximum capacity of the network is {rn.capacity()} agents.")
 
-simulator = mobility.Dynamics(rn, False, 69, 0.8)
+simulator = mobility.Dynamics(rn, False, 42, 0.8)
 simulator.killStagnantAgents(7.0)
 #simulator.setWeightFunction(mobility.PathWeight.TRAVELTIME, weightThreshold=1.5)
 
